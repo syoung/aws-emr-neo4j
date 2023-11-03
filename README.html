@@ -1,0 +1,424 @@
+<p>README.md</p>
+<h1>EMR cluster-based analysis on AI Training Platform</h1>
+<h2>Introduction</h2>
+<p>(NB: To view the markdown-formatted version of this file in VS Code: View -&gt; Command Palette -&gt; Markdown -&gt; Markdown: Open Preview to the Side)</p>
+<p>This document is intended for non-technical and technial users alike. It provides a step-by-step guide to running jobs on an EMR cluster from an EC2 instance. In our scenario, the EC2 instance has Neo4j running in a Docker container, which is the target for loading data from the EMR worker (i.e., core) nodes. The goal of the project is to develop an application suite that successfully runs jobs on the EMR cluster to load the data into Neo4j and then train one or more built-in machine learning algorithms.</p>
+<p>The rationale behind this infrastructure setup is that, for maximum efficiency, the Neo4j database should be installed on an EC2 instance connected to the EMR cluster. This is because the EMR cluster nodes are designed for processing data, not storing it. The EC2 instance can be configured with more storage and memory, which will improve the performance of the Neo4j database.</p>
+<p><img src="images/emr-workflow-paradigm-v1-transparent.png" alt="image"></p>
+<h2>Operating system</h2>
+<p>To save on setup time, you can choose an AMI (Amazon Machine Image) that has Neo4j already installed. Here's how we found the AMI we are using for this project:</p>
+<p>AWS Console -&gt; SEARCH: AMI CATALOG -&gt; COMMUNITY AMIs -&gt; SEARCH: &quot;NEO4J UBUNTU 22.04&quot;</p>
+<p>The AMI details are as follows:</p>
+<h4>neo4j VERSION: 5.7</h4>
+<h4>OS TYPE/VERSION: Ubuntu 22.04</h4>
+<p>Verified provider<br>
+websoft9-neo4j-community-5.7-UbuntuLTS22.04-4451506a-7dab-4bac-98e5-6f2b11e526cc<br>
+ami-0649656bd7a22cf9f<br>
+Platform: Ubuntu<br>
+Architecture: x86_64<br>
+Owner: 679593333241<br>
+Publish date: 2023-05-30<br>
+Root device type: ebs<br>
+Virtualization: hvm<br>
+ENA enabled: Yes<br>
+Select</p>
+<h4>INSTANCE TYPE</h4>
+<p>t3.xlarge<br>
+Family: t3<br>
+4 vCPU<br>
+16 GiB Memory<br>
+Current generation: true</p>
+<h2>Development workflow</h2>
+<p>In brief, the development workflow is as follows:</p>
+<ol>
+<li>SSH into the EMR Cluster Primary node</li>
+<li>Edit the .java file then compile it and build the jar.zip file</li>
+<li>Verify that the jar.zip file runs successfully</li>
+<li>Upload the jar.zip file to S3 and rename the local copy</li>
+<li>SSH into the EC2 instance</li>
+<li>Run python script to download and run the jar.zip file</li>
+<li>Verify the output. Repeat steps 1-6 until satisfied.</li>
+<li>Replace the test data with the full production data and run step 6 for the last time.</li>
+</ol>
+<p>Let's go into the details of the workflow on the command line.</p>
+<h4>1. SSH into the EMR Cluster Primary node</h4>
+<p>If you haven't already, request CSN VPN access here (you can't access cloud resources using AnyConnect):</p>
+<p><a href="https://confluence.boozallencsn.com/display/INFO/Requesting+CSN+VPN+Access">Requesting CSN VPN access</a></p>
+<p>As the page explains, you have to install the F5 VPN app to access the AWS console in your browser or any AWS resources on the command line (e.g., with AWS CLI). Install the F5 VPN app here:</p>
+<p>https://vpn.boozallencsn.com</p>
+<p>... and log in with your CSN credentials in order to download the F5 VPN client.</p>
+<p>If you check your F5 connection details, you'll see you have an IP address like this:</p>
+<p>10.138.x.x</p>
+<p><img src="images/f5-vpn-ip-configuration.png" alt="images/f5-vpn-ip-configuration.png"></p>
+<p>All machines in the 10.138.x.x range can access the AI Training Platform account in the AWS console by browser.</p>
+<p><img src="images/exclamation-mark-red-24x24.png" alt="image"> Please note that, additional restrictions apply to accessing the ports of AWS compute resources like EC2 instances and containers. See <a href="###appendix-2.-port-access-list">Appendix 2. Port access list</a> for the list of ports you can access by default and how to add to this list by making a port access request.</p>
+<p>Next, locate the EMR cluster primary node in the AWS console.</p>
+<p>SEARCH: EMR -&gt; Search: &lt;my-project&gt; -&gt; Click on cluster -&gt; Instances -&gt; Primary -&gt; Click on instance ID -&gt; Look for Private IP</p>
+<p>Connect to the EMR cluster primary node:</p>
+<pre><code class="language-bash">ssh -i &lt;my-project&gt;.pem ec2-user@&lt;PRIMARY-NODE-PRIVATE-IP&gt;
+</code></pre>
+<p><img src="images/exclamation-mark-red-24x24.png" alt="image"> Note: Why is it 'ec2-user' and not 'ubuntu'? Because the EMR cluster we chose does not use Ubuntu as it's operating system. Rather it uses Redhat, Amazon Linux or some other non-Ubuntu flavour of Linux).</p>
+<h4>2. Edit the .java file then compile it and build the jar.zip file</h4>
+<p>On the EMR cluster primary node, download the fraud-model-test.java (or your own .java file) from S3:</p>
+<pre><code class="language-bash">aws s3 cp --recursive s3://ai-txg-graph-2023/code .
+</code></pre>
+<p>Edit the .java file then compile it:</p>
+<pre><code class="language-bash">cd code
+javac fraud-model-test.java
+</code></pre>
+<p>Move the .class file to your 'jar' folder:</p>
+<pre><code class="language-bash">mv fraud-model-test.class ../jar
+</code></pre>
+<p>Zip it up with your data file and the neo4j java driver and your data .csv file, and then move it to the base directory:</p>
+<pre><code class="language-bash">jar cvf jar.zip *
+ added manifest
+ adding: creditcard-10.csv(in = 4925) (out= 2440)(deflated 50%)
+ adding: neo4j-java-driver-slim-4.12.0.jar(in = 291145) (out= 250880)(deflated 13%)
+ adding: PreprocessingMapper.class(in = 4973) (out= 2200)(deflated 55%)
+
+mv jar.zip ..
+</code></pre>
+<h4>3. Verify that the jar.zip file runs successfully</h4>
+<p>First, enable the hadoop command for your user ('ec2-user')</p>
+<pre><code class="language-bash">sudo usermod -aG hdfsadmingroup ec2-user
+</code></pre>
+<p>Log out of your SSH session, then connect again with SSH:</p>
+<pre><code class="language-bash"># EXIT EMR CLUSTER PRIMARY NODE
+exit; exit; exit;
+
+# LOG BACK IN FROM YOUR LAPTOP
+ssh -i &lt;my-project&gt;.pem ec2-user@&lt;PRIMARY-NODE-PRIVATE-IP&gt;
+</code></pre>
+<p>Now, create the directory to house your input and output file folders:</p>
+<pre><code class="language-bash">hadoop fs -mkdir hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/
+</code></pre>
+<p>You can also copy any input files to an 'inputs' folder:</p>
+<pre><code class="language-bash">hadoop fs -mkdir hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/inputs
+hadoop fs -put creditcard-10.csv hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/inputs
+
+# VERIFY CONTENTS OF 'inputs' FOLDER
+hadoop fs -ls creditcard-10.csv hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/inputs
+</code></pre>
+<p><img src="images/exclamation-mark-red-24x24.png" alt="image">  Note: When you run a job with the 'outputs' folder argument, it will fail if the folder already exists, e.g. this command:</p>
+<pre><code class="language-bash">hadoop jar jar.zip inputs outputs
+</code></pre>
+<p>... will fail if this folder already exists:</p>
+<p>hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs</p>
+<p>But, you can just delete the folder before running the job:</p>
+<pre><code class="language-bash">hadoop fs -rmdir hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs
+</code></pre>
+<p>Run the jar.zip file:</p>
+<pre><code class="language-bash"># JUST IN CASE
+export CLASSPATH=`pwd`/code/target/neo4j-java-driver-slim-4.12.0.jar:$CLASSPATH
+
+# NOW RUN IT
+hadoop jar jar.zip PreprocessingMapper inputs outputs
+
+ 2023-07-07 18:47:49,415 INFO client.DefaultNoHARMFailoverProxyProvider: Connecting to ResourceManager at ip-10-194-29-205.csn.internal/10.194.29.205:8032
+ 2023-07-07 18:47:49,586 INFO client.AHSProxy: Connecting to Application History server at ip-10-194-29-205.csn.internal/10.194.29.205:10200
+ 2023-07-07 18:47:49,862 WARN mapreduce.JobResourceUploader: Hadoop command-line option parsing not performed. Implement the Tool interface and execute your application with ToolRunner to remedy this.
+ 2023-07-07 18:47:49,884 INFO mapreduce.JobResourceUploader: Disabling Erasure Coding for path: /tmp/hadoop-yarn/staging/ec2-user/.staging/job_1688754857121_0002
+ 2023-07-07 18:47:50,269 INFO input.FileInputFormat: Total input files to process : 0
+ 2023-07-07 18:47:50,404 INFO mapreduce.JobSubmitter: number of splits:0
+ 2023-07-07 18:47:50,583 INFO mapreduce.JobSubmitter: Submitting tokens for job: job_1688754857121_0002
+ 2023-07-07 18:47:50,583 INFO mapreduce.JobSubmitter: Executing with tokens: []
+ 2023-07-07 18:47:50,900 INFO conf.Configuration: resource-types.xml not found
+ 2023-07-07 18:47:50,901 INFO resource.ResourceUtils: Unable to find 'resource-types.xml'.
+ 2023-07-07 18:47:51,554 INFO impl.YarnClientImpl: Submitted application application_1688754857121_0002
+ 2023-07-07 18:47:51,691 INFO mapreduce.Job: The url to track the job: http://ip-10-194-29-205.csn.internal:20888/proxy/application_1688754857121_0002/
+ 2023-07-07 18:47:51,691 INFO mapreduce.Job: Running job: job_1688754857121_0002
+ 2023-07-07 18:48:00,810 INFO mapreduce.Job: Job job_1688754857121_0002 running in uber mode : false
+ 2023-07-07 18:48:00,811 INFO mapreduce.Job:  map 0% reduce 0%
+ 2023-07-07 18:48:07,883 INFO mapreduce.Job:  map 0% reduce 33%
+ 2023-07-07 18:48:10,897 INFO mapreduce.Job:  map 0% reduce 100%
+ 2023-07-07 18:48:10,907 INFO mapreduce.Job: Job job_1688754857121_0002 completed successfully
+ 2023-07-07 18:48:11,150 INFO mapreduce.Job: Counters: 41
+  File System Counters
+   FILE: Number of bytes read=0
+   FILE: Number of bytes written=872279
+   FILE: Number of read operations=0
+   FILE: Number of large read operations=0
+   FILE: Number of write operations=0
+   HDFS: Number of bytes read=0
+   HDFS: Number of bytes written=0
+   HDFS: Number of read operations=15
+   HDFS: Number of large read operations=0
+   HDFS: Number of write operations=6
+   HDFS: Number of bytes read erasure-coded=0
+  Job Counters 
+   Launched reduce tasks=3
+   Total time spent by all maps in occupied slots (ms)=0
+   Total time spent by all reduces in occupied slots (ms)=1350624
+   Total time spent by all reduce tasks (ms)=15348
+   Total vcore-milliseconds taken by all reduce tasks=15348
+   Total megabyte-milliseconds taken by all reduce tasks=43219968
+  Map-Reduce Framework
+   Combine input records=0
+   Combine output records=0
+   Reduce input groups=0
+   Reduce shuffle bytes=0
+   Reduce input records=0
+   Reduce output records=0
+   Spilled Records=0
+   Shuffled Maps =0
+   Failed Shuffles=0
+   Merged Map outputs=0
+   GC time elapsed (ms)=259
+   CPU time spent (ms)=1830
+   Physical memory (bytes) snapshot=749363200
+   Virtual memory (bytes) snapshot=12591017984
+   Total committed heap usage (bytes)=571473920
+   Peak Reduce Physical memory (bytes)=252178432
+   Peak Reduce Virtual memory (bytes)=4197859328
+  Shuffle Errors
+   BAD_ID=0
+   CONNECTION=0
+   IO_ERROR=0
+   WRONG_LENGTH=0
+   WRONG_MAP=0
+   WRONG_REDUCE=0
+  File Output Format Counters 
+   Bytes Written=0
+</code></pre>
+<p>You should see something like this in the 'outputs' directory on HDFS:</p>
+<pre><code class="language-bash">hadoop fs -ls hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs
+
+hadoop fs -ls hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs
+
+ Found 4 items
+ -rw-r--r--   1 ec2-user hdfsadmingroup          0 2023-07-07 18:48 hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs/_SUCCESS
+ -rw-r--r--   1 ec2-user hdfsadmingroup          0 2023-07-07 18:48 hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs/part-r-00000
+ -rw-r--r--   1 ec2-user hdfsadmingroup          0 2023-07-07 18:48 hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs/part-r-00001
+ -rw-r--r--   1 ec2-user hdfsadmingroup          0 2023-07-07 18:48 hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs/part-r-00002
+
+
+hadoop fs -get hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs
+
+hadoop fs -get hdfs://ip-10-194-29-205.csn.internal:8020/user/ec2-user/outputs
+tree outputs
+ outputs
+ ├── part-r-00000
+ ├── part-r-00001
+ ├── part-r-00002
+ └── _SUCCESS
+
+ll outputs/
+
+ -rw-r--r-- 1 ec2-user ec2-user 0 Jul  7 19:03 part-r-00000
+ -rw-r--r-- 1 ec2-user ec2-user 0 Jul  7 19:03 part-r-00001
+ -rw-r--r-- 1 ec2-user ec2-user 0 Jul  7 19:03 part-r-00002
+ -rw-r--r-- 1 ec2-user ec2-user 0 Jul  7 19:03 _SUCCESS
+</code></pre>
+<h4>4. Upload the jar.zip file to S3 and rename the local copy</h4>
+<p>Copy the jar.zip file to S3 bucket:</p>
+<pre><code class="language-bash">aws s3 cp jar.zip  s3://ai-txg-graph-2023/data/
+
+  upload: ./jar.zip to s3://ai-txg-graph-2023/data/jar.zip          
+</code></pre>
+<p>List the contents of the S3 bucket:</p>
+<pre><code class="language-bash">aws s3 ls s3://ai-txg-graph-2023/data/
+
+ 2023-07-06 21:14:15  150828752 creditcard.csv
+ 2023-07-07 19:06:06     540502 jar.zip
+</code></pre>
+<p><img src="images/exclamation-mark-red-24x24.png" alt="image">  Note: Don't forget to rename the local jar.zip file, just in case it messes up the EC2 instance python script-managed download of the jar.zip file from S3 to the EMR cluster primary node:</p>
+<pre><code class="language-bash">mv jar.zip jar.zip.bkp01
+</code></pre>
+<h3>5. SSH into the EC2 instance</h3>
+<p>Using the .pem file you received from the AI Training platform admin team:</p>
+<pre><code class="language-bash">chmod 400 &lt;my-project&gt;.pem
+ssh -i &lt;my-project&gt;.pem ubuntu@&lt;EC2-INSTANCE-PRIVATE-IP&gt;
+</code></pre>
+<h3>6. Run python script to download and run the jar.zip file</h3>
+<p>The script will download the jar.zip file onto the EMR cluster and run it:</p>
+<pre><code class="language-bash">python3 fraud-model-test.py
+</code></pre>
+<p>Edit the file to change the following values to match your setup:</p>
+<p>cluster_id = '&lt;EMR-CLUSTER-ID&gt;'<br>
+jar_zipfile = &quot;s3://&lt;my-project&gt;/code/jar.zip&quot;<br>
+job_name = 'preprocessing-job'<br>
+jar_file = 'PreprocessingMapper.jar'<br>
+input_data_path = 's3://&lt;my-project&gt;/data/input'<br>
+output_data_path = 's3://&lt;my-project&gt;/data/output'<br>
+neo4j_endpoint_url = '&lt;EC2-INSTANCE-PRIVATE-IP&gt;:7474'</p>
+<p>For instructions and tips on accessing the Neo4j database, see <a href="###-appendix-1.-connect-to-neo4j-server">Appendix 1. Connect to Neo4j server</a>.</p>
+<p>To enable and/or troubleshoot writing to S3 from Neo4j, see <a href="###-appendix-2.-exporting-from-neo4j-to-s3">Appendix 2. Exporting from Neo4j to S3</a></p>
+<h3>7. Verify the output. Repeat steps 1-6 until satisfied.</h3>
+<p>Search the log files on the EMR cluster to troubleshoot EMR cluster jobs:</p>
+<pre><code class="language-bash">ls -al /usr/local/hadoop/logs/yarn--resourcemanager-core1.out
+</code></pre>
+<p>E.g., take a look in these folders:</p>
+<pre><code class="language-bash">/usr/local/hadoop/logs/yarn--resourcemanager-namenode.out
+/usr/local/hadoop/logs/yarn-root-nodemanager-core1.out
+/usr/local/hadoop/logs/yarn--resourcemanager-core2.out
+</code></pre>
+<h3>8. Replace the test data with the full production data and run step 6.</h3>
+<p>On the EMR cluster primary node, download the production data from your S3 bucket if you haven't already.</p>
+<p>cd ~/jar
+aws s3 cp s3://&lt;my-project&gt;/inputdata.csv</p>
+<p>Zip up PreprocessinMapper.java, inputdata.csv and the neo4j java driver:</p>
+<pre><code class="language-bash">jar cvf jar.zip *
+ added manifest
+ adding: inputdata.csv(in = 423421346761345) (out= 423421224234230)(deflated 50%)
+ adding: neo4j-java-driver-slim-4.12.0.jar(in = 291145) (out= 250880)(deflated 13%)
+ adding: PreprocessingMapper.class(in = 4973) (out= 2200)(deflated 55%)
+</code></pre>
+<p><img src="images/exclamation-mark-red-24x24.png" alt="image"> This time, instead of moving the jar.zip file to the base directory, upload it to S3:</p>
+<pre><code class="language-bash">aws s3 cp jar.zip s3://&lt;my-project&gt;
+</code></pre>
+<p>Next, on the EC2 instance, run step 6 to launch the EMR cluster jobs:</p>
+<pre><code class="language-bash">python3 fraud-model-test.py
+</code></pre>
+<p>... and verify the outputs, hopefully for the last time!</p>
+<h2>Appendices</h2>
+<h3>Appendix 1. Connect to Neo4j server</h3>
+<p>The AMI we chose for the EC2 instance has Neo4j installed as a docker container. Use the following commands to connect to the Docker container and login to Neo4j.</p>
+<p>Show running containers on EC2 instance:</p>
+<pre><code class="language-bash">docker ps   
+</code></pre>
+<p>If the container is not running or has some problems, you could delete any existing container and launch it again using the <a href="Dockerfile">Dockerfile</a> provided with this README.</p>
+<pre><code class="language-bash"># LIST IMAGES
+docker images
+
+# BUILD IMAGE FROM SCRATCH IF IMAGE neo4j WITH TAG 5.7 NOT PRESENT
+docker build - &lt; Dockerfile
+
+# NOW LAUNCH CONTAINER FROM IMAGE
+docker run -d -it -v neo4j:/var/lib/neo4j \
+-p 7473:7473 \
+-p 7474:7474 \
+-p 7687:7687 \
+--volume=$HOME/neo4j/data:/data \
+--env &quot;NEO4J_AUTH=neo4j/AgZnuoJNMMI4Dp!&quot; \
+--env &quot;APP_NAME=neo4j&quot; \
+--env &quot;APP_DB_NEO4J_PASSWORD=AgZnuoJNMMI4Dp!&quot; \
+--env &quot;APP_DB_NEO4J_USER=neo4j&quot; \
+--name neo4j \
+neo4j:5.7
+</code></pre>
+<p>Assuming the container is running, connect to  the container:</p>
+<pre><code class="language-bash">docker exec -it neo4j /bin/bash   
+
+# VERIFY neo4j IS RUNNING
+neo4j status
+
+ Neo4j is running at pid 7
+</code></pre>
+<p>Login to the Neo4j database:</p>
+<pre><code class="language-bash">alias cs=cypher-shell   
+cs -u neo4j -p AgZnuoJNMMI4Dp!   
+   
+ Connected to Neo4j using Bolt protocol version 5.2 at neo4j://localhost:7687 as user neo4j.   
+ Type :help for a list of available commands or :exit to exit the shell.   
+ Note that Cypher queries must end with a semicolon.   
+ neo4j@neo4j&gt;    
+</code></pre>
+<p>In Neo4j, get help information:</p>
+<pre><code class="language-bash">:help   
+</code></pre>
+<p>Show the default database:</p>
+<pre><code class="language-bash">  SHOW DEFAULT DATABASE;   
+  +--------------------------------------------------------------------------------------------------------------------------------------------------------+   
+  | name    | type       | aliases | access       | address          | role      | writer | requestedStatus | currentStatus | statusMessage | constituents |   
+  +--------------------------------------------------------------------------------------------------------------------------------------------------------+   
+  | &quot;neo4j&quot; | &quot;standard&quot; | []      | &quot;read-write&quot; | &quot;localhost:7687&quot; | &quot;primary&quot; | TRUE   | &quot;online&quot;        | &quot;online&quot;      | &quot;&quot;            | []           |   
+  +--------------------------------------------------------------------------------------------------------------------------------------------------------+   
+   
+  1 row   
+   
+ ready to start consuming query after 1947 ms, results consumed after another 34 ms   
+</code></pre>
+<p>Retrieve some data:</p>
+<pre><code class="language-bash">:use neo4j
+MATCH (n) RETURN n LIMIT 5;
+
+  +-------------------------------------------------------------------------------------------------------------+
+  | n                                                                                                           |
+  +-------------------------------------------------------------------------------------------------------------+
+  | (:Client {name: &quot;Bentley Peck&quot;, id: &quot;4997933060327094&quot;})                                                    |
+  | (:Merchant {name: &quot;MYrsa&quot;, id: &quot;03-0000524&quot;})                                                               |
+  | (:CashIn:Transaction {globalStep: 1, amount: 129105.89322441132, fraud: FALSE, step: 1, id: &quot;tx-1&quot;, ts: 1}) |
+  | (:Merchant {name: &quot;MFelics Ltd&quot;, id: &quot;93-0006151&quot;})                                                         |
+  | (:CashIn:Transaction {globalStep: 2, amount: 299557.94653988, fraud: FALSE, step: 1, id: &quot;tx-2&quot;, ts: 1})    |
+  +-------------------------------------------------------------------------------------------------------------+
+</code></pre>
+<p>Show database schema:</p>
+<pre><code class="language-bash">CALL db.schema.visualization();
+</code></pre>
+<p>Create a new fraud detection model called 'fraud_detection_model' and train it on the data in file 'creditcard.csv':</p>
+<pre><code class="language-bash"> CREATE PROCEDURE train_fraud_detection_model()
+ AS
+ BEGIN
+   MERGE (model:FraudDetectionModel {name: &quot;fraud_detection_model&quot;})
+   WITH model
+   CALL apoc.ml.train_logistic_regression(model, creditcard.csv);
+ END;
+</code></pre>
+<p>To interact programatically with the database, use boto3 or neo4j Python libraries:</p>
+<h3>boto3 python module</h3>
+<p>INSTALL</p>
+<pre><code class="language-bash">pip3 install boto3   
+</code></pre>
+<p>CODE EXAMPLE</p>
+<p>SEE FILE <a href="fraud-model-test.py">fraud-model-test.py</a></p>
+<h3>neo4j python module</h3>
+<p>SEE <a href="https://neo4j.com/docs/python-manual/current/">https://neo4j.com/docs/python-manual/current/</a></p>
+<p>INSTALL</p>
+<pre><code class="language-bash">pip3 install neo4j   
+</code></pre>
+<p>CODE EXAMPLE</p>
+<pre><code class="language-bash">from neo4j import GraphDatabase   
+   
+# URI examples: &quot;neo4j://localhost&quot;, &quot;neo4j+s://xxx.databases.neo4j.io&quot;   
+URI = &quot;&lt;URI for Neo4j database&gt;&quot;   
+AUTH = (&quot;&lt;Username&gt;&quot;, &quot;&lt;Password&gt;&quot;)   
+   
+with GraphDatabase.driver(URI, auth=AUTH) as driver:   
+    driver.verify_connectivity()   
+</code></pre>
+<h3>Appendix 2. Exporting from Neo4j to S3</h3>
+<p><a href="https://neo4j.com/labs/apoc/4.1/export/json/">https://neo4j.com/labs/apoc/4.1/export/json/</a></p>
+<p>By default, exporting to s3 is disabled. Enable it as follows:</p>
+<p>Verify the latest version (currently 4.4.0.19) of apoc-&lt;version&gt;.jar:</p>
+<p>https://github.com/neo4j-contrib/neo4j-apoc-procedures/releases</p>
+<p>... and download it to the Neo4j plugins directory on the EC2 cluster primary node (inside the container if you are running one for Neo4j):</p>
+<pre><code class="language-bash">cd /var/lib/neo4j/plug   
+wget https://github.com/neo4j-contrib/neo4j-apoc-procedures/releases/download/4.4.0.19/apoc-4.4.0.19-all.jar   
+chown neo4j:neo4j apoc-4.4.0.19-all.jar   
+chmod 755 apoc-4.4.0.19-all.jar   
+</code></pre>
+<p>EDIT neo4j.conf:</p>
+<pre><code class="language-bash">yum install -y emacs
+emacs /var/lib/neo4j/conf/neo4j.conf   
+</code></pre>
+<p>REPLACE</p>
+<pre><code class="language-bash">###dbms.security.procedures.whitelist=apoc.coll.*,apoc.load.*    
+#dbms.security.procedures.allowlist=apoc.coll.*,apoc.load.*,gds.*    
+</code></pre>
+<p>WITH</p>
+<pre><code class="language-bash">dbms.security.procedures.allowlist=apoc.coll.*,apoc.load.*,gds.*,apoc.*    
+apoc.export.file.enabled=true   
+</code></pre>
+<p>RESTART NEO4J</p>
+<pre><code class="language-bash">neo4j-admin server restart   
+
+ (CONTAINER STOPS AND RESTARTS)   
+   
+ Stopping Neo4j.................ubuntu@ip-10-194-29-220:~$    
+</code></pre>
+<p>RECONNECT TO CONTAINER</p>
+<pre><code class="language-bash">docker exec -it neo4j /bin/bash   
+</code></pre>
+<p>Now log into Neo4j:</p>
+<pre><code class="language-bash">alias cs=cypher-shell   
+cs -u neo4j -p AgZnuoJNMMI4Dp!   
+</code></pre>
+<p>... and test out writing to S3 (assuming the 'exports' subfolder exists in your bucket):</p>
+<pre><code class="language-bash">CALL apoc.export.csv.query(&quot;MATCH (a:Person) RETURN  a.name as name&quot;,   
+&quot;s3://s3.sa-east-1.amazonaws.com/&lt;my-project&gt;/exports/neo4j_test.csv?accessKey   
+</code></pre>
+<h3>Appendix 3. Port access list</h3>
+<p>The following ports are open by default for the AI Training Platform account (813960883910):</p>
+<p><img src="images/account-813960883910-open-ports.png" alt="image"></p>
+<p>If you need to add a port to this list, make a request using the instructions here:</p>
+<p><a href="https://confluence.boozallencsn.com/display/CKB/F5+Big-IP+Port+Access+Request">F5 Big-IP Port Access Request</a></p>

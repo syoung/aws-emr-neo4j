@@ -1,0 +1,34 @@
+version: "3"
+services:
+  namenode:
+    image: sequenceiq/hadoop-docker:2.7.1
+    container_name: namenode
+    hostname: namenode
+    privileged: true
+    ports:
+      - "9870:9870"  # Namenode web UI
+    volumes:
+      - ./data/namenode:/hadoop/dfs/name
+    command: /etc/bootstrap.sh -d namenode
+
+  core1:
+    image: sequenceiq/hadoop-docker:2.7.1
+    container_name: core1
+    hostname: core1
+    privileged: true
+    depends_on:
+      - namenode
+    volumes:
+      - ./data/core1:/hadoop/dfs/data
+    command: /etc/bootstrap.sh -d datanode
+
+  core2:
+    image: sequenceiq/hadoop-docker:2.7.1
+    container_name: core2
+    hostname: core2
+    privileged: true
+    depends_on:
+      - namenode
+    volumes:
+      - ./data/core2:/hadoop/dfs/data
+    command: /etc/bootstrap.sh -d datanode

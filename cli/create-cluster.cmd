@@ -1,0 +1,12 @@
+aws emr create-cluster \
+ --name "ai-txg-graph-2023-emr" \
+ --log-uri "s3n://ai-txg-graph-2023/logs/" \
+ --release-label "emr-6.11.0" \
+ --service-role "arn:aws:iam::813960883910:role/AWSRoleForEMR" \
+ --security-configuration "ai-txg-graph-2023-security-group" \
+ --ec2-attributes '{"InstanceProfile":"AWSRoleForEC2EMR","EmrManagedMasterSecurityGroup":"sg-000e6a27ab639d433","EmrManagedSlaveSecurityGroup":"sg-0b0be0a0fb3f6f3d5","KeyName":"admin-key-sandbox","AdditionalMasterSecurityGroups":["sg-004f7ed95217222f2"],"AdditionalSlaveSecurityGroups":["sg-004f7ed95217222f2"],"ServiceAccessSecurityGroup":"sg-09e8034e079f41c6b","SubnetId":"subnet-0c32dd72b71458f2a"}' \
+ --applications Name=Hadoop Name=Hive Name=Hue Name=Pig Name=Tez \
+ --instance-groups '[{"InstanceCount":1,"InstanceGroupType":"MASTER","Name":"Primary","InstanceType":"c4.xlarge","EbsConfiguration":{"EbsBlockDeviceConfigs":[{"VolumeSpecification":{"VolumeType":"gp2","SizeInGB":32},"VolumesPerInstance":2}]}},{"InstanceCount":2,"InstanceGroupType":"CORE","Name":"Core","InstanceType":"c4.xlarge","EbsConfiguration":{"EbsBlockDeviceConfigs":[{"VolumeSpecification":{"VolumeType":"gp2","SizeInGB":32},"VolumesPerInstance":2}]}}]' \
+ --scale-down-behavior "TERMINATE_AT_TASK_COMPLETION" \
+ --os-release-label "2.0.20230808.0" \
+ --region "us-east-1"
